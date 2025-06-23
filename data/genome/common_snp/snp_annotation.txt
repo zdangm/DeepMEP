@@ -1,0 +1,1 @@
+the snp annotation can be loaded from dbSNP
