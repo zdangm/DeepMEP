@@ -1,7 +1,7 @@
 # DeepMEP
 A deep learning model that can quantify the missense mutation effect on phosphorylation.
 
-## Phosphorylation annotations
+## Phosphorylation annotations used for model training
 The phosphorylation annotations should be placed at directory as followes:
 1. CBMAP: 'data/dataset/CBMAP/lab_phos_data.txt'
 2. Uniprot: 'data/dataset/uniprot/uniprot_phos_data.txt'
@@ -55,8 +55,8 @@ All kinase-specific phosphorylation annotations from EPSD should be processed in
 | Q9H2K8    | 182 | Y  | SLK       | RegPhos         | SLK    | STE   | STE20  | WEIIGELGDGAFGKVYKAQNKETSVLAAAKVIDTKSEEELEDYMVE...                           |
 | O00303    | 45  | S  | PITSLRE   | PSEA            | PITSLRE| CMGC  | CDK    | FQCLNRIEEGTYGVVYRAKDKKTDEIVALKRLKMEKEKEGFPITSL...                           |
 
-## SNP annotations
-### missense mutation
+## SNP annotations used for model utility
+### Missense mutation annotations
 The mutant sequence and reference sequence for each missense should be processed into the table as followes:
 | variant_info                  | transtript_id   | cds_variant   | aa_variant   | pos | aa_ref | aa_alt | names                                                            | width | SNP          | ref | alt | gene   | sequence                                                                 |
 |-------------------------------|-----------------|---------------|--------------|-----|--------|--------|------------------------------------------------------------------|-------|--------------|-----|-----|--------|--------------------------------------------------------------------------|
@@ -72,8 +72,8 @@ The mutant sequence and reference sequence for each missense should be processed
 | NM_214711:c.G494C:p.G165A     | NM_214711       | c.G494C       | p.G165A      | 165 | G      | A      | line11007853 NM_214711 c.G494C p.G165A protein...                | 220   | rs142405912  | G   | C   | PRR27  | MKLLLWACIVCVAFARKRRFPFIGEDDNDDGHPLHPSLNIPYGIRN...                        |
 | NM_214711:c.T557C:p.V186A     | NM_214711       | c.T557C       | p.V186A      | 186 | V      | A      | line11007855 NM_214711 c.T557C p.V186A protein...                | 220   | rs112603630  | T   | C   | PRR27  | MKLLLWACIVCVAFARKRRFPFIGEDDNDDGHPLHPSLNIPYGIRN...                        |
 
-### Ld score and MAF for variants
-The ld score and MAF can be obtained from GCTA.
+### LD score and MAF for variants
+The ld score and MAF can be obtained from GCTA with a cut off 0.005 of MAF.
 
 ### SNP annotation
 The snp annotation can be sourced from dbSNP.
