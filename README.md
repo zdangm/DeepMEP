@@ -1,5 +1,7 @@
 # DeepMEP
-A deep learning model that can quantify the missense mutation effect on phosphorylation.
+A deep learning model that can quantify the missense mutation effect on phosphorylation.  
+<img width="866" height="745" alt="image" src="https://github.com/user-attachments/assets/e38dd58d-154b-49b7-aef8-0a8d7cf5dc00" />
+
 
 ## Phosphorylation annotations used for model training
 The phosphorylation annotations should be placed at directory as followes:
