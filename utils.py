@@ -29,6 +29,8 @@ from torch.nn.functional import relu, softmax, unfold
 from typing import Any, Tuple, List, Dict, Set, Optional, Union
 from typing_extensions import Literal
 from scipy.stats import hypergeom, gaussian_kde
+from scipy import stats
+# from statsmodels.stats.multitest import multipletests
 
 
 def do_nothing(*args):
@@ -118,8 +120,7 @@ def compute_metrics(preds: torch.Tensor, targets: torch.Tensor, pos_threshold: f
 
 
 def make_dir(path):
-    if not os.path.exists(path):
-        os.mkdir(path)
+    os.makedirs(path, exist_ok=True)
 
 
 def alter_string_at_pos(strings: str, pos: int, new_char: str) -> str:
@@ -146,6 +147,21 @@ def get_main_device(device_id: Union[Literal['cpu'], int, List, None]) -> torch.
             return get_device(device_id)
 
 
+def calculate_confidence_intervals_t_test(experiment_results):
+    n = len(experiment_results)
+    mean_val = np.mean(experiment_results)
+    std_val = np.std(experiment_results, ddof=1)
+    se_val = std_val / np.sqrt(n)
+
+    confidence_level = 0.95
+    df = n - 1
+    t_critical = stats.t.ppf((1 + confidence_level) / 2, df=df)
+
+    ci_lower = mean_val - t_critical * se_val
+    ci_upper = mean_val + t_critical * se_val
+    return mean_val, ci_lower, ci_upper
+
+
 def load_str_batch(batch_size: int, feature: List[str], label,
                    label_mask=None, s=None, drop_last: bool = False):
     # return: feature_str, label, label_anno (None), s (None)
@@ -167,3 +183,44 @@ def load_str_batch(batch_size: int, feature: List[str], label,
     if drop_last:
         data_loader = data_loader[:-1]
     return data_loader
+
+
+def get_gtex_tissues():
+    return [
+        "Adipose_Subcutaneous", "Adipose_Visceral_Omentum", "Adrenal_Gland", "Artery_Aorta", "Artery_Coronary", "Artery_Tibial",
+        "Brain_Amygdala", "Brain_Anterior_cingulate_cortex_BA24", "Brain_Caudate_basal_ganglia", "Brain_Cerebellar_Hemisphere",
+        "Brain_Cerebellum", "Brain_Cortex", "Brain_Frontal_Cortex_BA9", "Brain_Hippocampus", "Brain_Hypothalamus",
+        "Brain_Nucleus_accumbens_basal_ganglia", "Brain_Putamen_basal_ganglia", "Brain_Spinal_cord_cervical_c-1",
+        "Brain_Substantia_nigra", "Breast_Mammary_Tissue", "Cells_Cultured_fibroblasts", "Cells_EBV-transformed_lymphocytes",
+        "Colon_Sigmoid", "Colon_Transverse", "Esophagus_Gastroesophageal_Junction", "Esophagus_Mucosa", "Esophagus_Muscularis",
+        "Heart_Atrial_Appendage", "Heart_Left_Ventricle", "Kidney_Cortex", "Liver", "Lung", "Minor_Salivary_Gland",
+        "Muscle_Skeletal", "Nerve_Tibial", "Ovary", "Pancreas", "Pituitary", "Prostate", "Skin_Not_Sun_Exposed_Suprapubic",
+        "Skin_Sun_Exposed_Lower_leg", "Small_Intestine_Terminal_Ileum", "Spleen", "Stomach", "Testis",
+        "Thyroid", "Uterus", "Vagina", "Whole_Blood"
+    ]
+
+
+def runPrediXcan(tissue_i, trait_i):
+    tissue_name = get_gtex_tissues()[tissue_i]
+
+    disease_name, gwas_path = [
+        ('AD', '/AD/file2/ADfile2_processed.txt'), ('BIP', '/BIP/BIP_processed.txt'), ('BMI', '/BMI/BMI_processed.txt'),
+        ('EA', '/EA/EA_processed.txt'), ('IQ', '/IQ/IQ_processed.txt'), ('MDD', '/MDD/MDD_processed.txt'),
+        ('PD', '/PD/PD_processed.txt'), ('PTSD', '/PTSD/PTSD_processed.txt'), ('SCZ', '/SCZ/file2/SCZfile2_processed.txt'),
+        ('TAAU-CigDay', '/TAAU/EUR_stratified/CigDay_processed.txt'), ('TAAU-SmkInit', '/TAAU/EUR_stratified/SmkInit_processed.txt')
+    ][trait_i]
+    print((disease_name, tissue_name))
+
+    rs_dir = '/data/projects/xuy/DeepMEP/data/TWAS/'
+    make_dir(f'/data/projects/xuy/DeepMEP/data/TWAS/{disease_name}')
+    asso_out_path = f'/data/projects/xuy/DeepMEP/data/TWAS/{disease_name}/{tissue_name}.txt'
+    beta_name = 'stdBeta' if disease_name == 'IQ' else 'beta'
+    cmd_str = (f'Rscript R_function/predixcan_r.r --asso_test '
+               f'--db_path /data/projects/xuy/covid19_drug_reposition/disease_signature/AD/TWAS_raw/PrediXcan/db/combo_{tissue_name}.db '
+               f'--cov_path /data/projects/xuy/covid19_drug_reposition/disease_signature/AD/TWAS_raw/PrediXcan/cov/combo_{tissue_name}.txt.gz '
+               f'--gwas_path /data/shared_data/neuropsych_GWAS/EUR/processed{gwas_path} '
+               f'--gwas_variant_col rsid --gwas_beta_col {beta_name} --gwas_se_col se '
+               f'--gwas_eff_allele_col effect_allele --gwas_ref_allele_col reference_allele '
+               f'--asso_out_path {asso_out_path}')
+    if not os.path.exists(asso_out_path):
+        os.system(cmd_str)

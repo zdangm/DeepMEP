@@ -3,6 +3,160 @@ from Protein import ProteinSeq, DiscreteEncoder, ResidueInfo
 from Genome2Proteome import CommonSNP, Genome2Proteome, RareSNP
 
 
+def process_uniprot_phos_data():
+    # process phosphorate data from uniprot
+    file_path = 'data/dataset/uniprot/uniprotkb_AND_model_organism_9606_AND_r_2024_09_02.tsv'
+    public_raw_seq = pd.read_csv(file_path, sep='\t')
+    public_raw_seq = public_raw_seq[~public_raw_seq['Modified residue'].isna()]
+    uniprot_phos_data = []
+    for i, row in public_raw_seq.iterrows():
+        seq, protein, modified_type = row['Sequence'], row['Entry'], row['Modified residue']
+        modified_type_split = modified_type.split('MOD_RES ')
+        for split_type in modified_type_split:
+            if '; /' in split_type:
+                split_split_lst = split_type.split('; /')
+                if (('Phosphoserine' in split_split_lst[1])
+                        or ('Phosphotyrosine' in split_split_lst[1])
+                        or ('Phosphothreonine' in split_split_lst[1])):
+                    phos_pos_ = split_split_lst[0]
+                    try:
+                        pos = int(phos_pos_) - 1
+                        uniprot_phos_data.append((protein, pos, seq[pos], 1))
+                    except Exception as e:
+                        do_nothing(e)
+    uniprot_df = pd.DataFrame(uniprot_phos_data, columns=['accession', 'pos', 'aa', 'phosphorylation'])
+
+    # check uniprot phos data
+    protein_sequences = ProteinSeq().protein_sequences
+    error_lst = []
+    for i in range(uniprot_df.shape[0]):
+        entry = uniprot_df.iloc[i].iloc[0]
+        pos = uniprot_df.iloc[i].iloc[1]
+        aa = uniprot_df.iloc[i].iloc[2]
+        try:
+            if protein_sequences[entry][pos] != aa:
+                error_lst.append(entry)
+        except Exception as e:
+            error_lst.append(entry)
+            do_nothing(e)
+    uniprot_df = uniprot_df[~uniprot_df['accession'].isin(set(error_lst))]
+    # uniprot_df['site_id'] = uniprot_df['accession'] + '_' + uniprot_df['pos'].astype(str) + '_' + uniprot_df['aa']
+    uniprot_df.to_csv('data/dataset/uniprot/uniprot_phos_data.txt', index=False, sep='\t')
+    return uniprot_df
+
+
+def process_kinase_category():
+    kinase_category = pd.read_csv('data/dataset/EPSD_annotation/kinase_family.csv')
+    kinase_category['Name'] = kinase_category['Name'].str.upper()
+    kinase_category['Group'] = kinase_category['Group'].str.upper()
+    kinase_category['Family'] = kinase_category['Family'].str.upper()
+    # drop kinases that do not have kinase domains
+    # kinase_category = kinase_category[~(kinase_category['Kinase Domain'] == ' ')]
+    return kinase_category[['Name', 'Group', 'Family', 'Kinase Domain']]
+
+
+def process_epsd_kinase_phos_data():
+    # https://epsd.biocuckoo.cn/Download.php
+    # experiment: 'DEPOD', 'PSEA', 'Phospho.ELM', 'PhosphoSitePlus', 'PostMod', 'RegPhos'
+    # predict: GPS, NetworKIN, PhosphoPICK, PKIS
+    # no kinase: PhosphoNetworks; no position: HuPHO
+    # step 1: load data
+    phosphositeplus = pd.read_csv('data/dataset/EPSD_annotation/kinase_annotation/PhosphoSitePlus.txt', sep='\t')
+    phosphositeplus['db'] = 'PhosphoSitePlus'
+    phosphoELM = pd.read_csv('data/dataset/EPSD_annotation/kinase_annotation/Phospho.ELM.txt', sep='\t')
+    phosphoELM['db'] = 'Phospho.ELM'
+    depod = pd.read_csv('data/dataset/EPSD_annotation/kinase_annotation/DEPOD.txt', sep='\t')
+    depod = depod.loc[~depod['Position'].isna(), :]
+    depod.columns = ['EPSD ID', 'UniProt', 'Position', 'Kinase', 'Source']
+    depod['db'] = 'DEPOD'
+    regphos = pd.read_csv('data/dataset/EPSD_annotation/kinase_annotation/RegPhos.txt', sep='\t')
+    regphos['db'] = 'RegPhos'
+    psea = pd.read_csv('data/dataset/EPSD_annotation/kinase_annotation/PSEA.txt', sep='\t')
+    psea['db'] = 'PSEA'
+    postmod = pd.read_csv('data/dataset/EPSD_annotation/kinase_annotation/PostMod.txt', sep='\t')
+    postmod['db'] = 'PostMod'
+    kinase_anno = pd.concat([phosphositeplus, phosphoELM, depod, regphos, psea, postmod], axis=0)
+    kinase_anno = kinase_anno.reset_index(drop=True)
+    kinase_anno = kinase_anno.loc[~(kinase_anno['Position'] == 'N/A '), :]
+    kinase_anno = kinase_anno[['UniProt', 'Position', 'Kinase', 'db']]
+    # step 2: formulate data
+    protein_sequences = ProteinSeq().protein_sequences
+    kinase_anno = kinase_anno[kinase_anno['UniProt'].isin(protein_sequences.keys())]  # 29073
+    kinase_anno = kinase_anno.reset_index(drop=True)
+    pos_res = []
+    for i, row in kinase_anno.iterrows():
+        pos_str, entry = row['Position'], row['UniProt']
+        if pos_str.isnumeric():
+            pos = int(pos_str) - 1
+            res = protein_sequences[entry][pos]
+        else:
+            res = pos_str[0]
+            pos = int(pos_str[1:]) - 1
+        pos_res.append((pos, res))
+    pos_res = pd.DataFrame(pos_res, columns=['pos', 'aa'])
+    kinase_anno = pd.concat([kinase_anno, pos_res], axis=1)
+    kinase_anno = kinase_anno[kinase_anno['aa'].isin({'S', 'T', 'Y'})]  # 29072
+    kinase_anno = kinase_anno[['UniProt', 'pos', 'aa', 'Kinase', 'db']]
+    kinase_anno.columns = ['accession', 'pos', 'aa', 'kinase', 'db']
+    kinase_anno = kinase_anno.drop_duplicates(subset=['accession', 'pos', 'aa', 'kinase'])  # 18991
+    # step 3: check sequence consistent
+    error_lst = []
+    for i in range(kinase_anno.shape[0]):
+        accession = kinase_anno.iloc[i].iloc[0]
+        pos = kinase_anno.iloc[i].iloc[1]
+        aa = kinase_anno.iloc[i].iloc[2]
+        try:
+            if protein_sequences[accession][pos] != aa:
+                error_lst.append(accession)
+        except Exception as e:
+            error_lst.append(accession)
+            do_nothing(e)
+    kinase_anno = kinase_anno[~kinase_anno['accession'].isin(set(error_lst))]  # 18752
+    # step 4: formulate kinase
+    phos_kinase_anno = kinase_anno.copy()
+    phos_kinase_anno['kinase'] = phos_kinase_anno['kinase'].str.replace('_group', '')
+    phos_kinase_anno['kinase'] = phos_kinase_anno['kinase'].str.replace('(', ';', regex=False)
+    phos_kinase_anno['kinase'] = phos_kinase_anno['kinase'].str.replace(')', '', regex=False)
+    phos_kinase_anno['kinase'] = phos_kinase_anno['kinase'].str.replace('/', ';', regex=False)
+    phos_kinase_anno['kinase'] = phos_kinase_anno['kinase'].str.split(';')
+    phos_kinase_anno = phos_kinase_anno.explode(column='kinase')
+    phos_kinase_anno['kinase'] = phos_kinase_anno['kinase'].str.upper()  # 20161
+    replace_dict = {
+        'CAMK1-ALPHA': 'CAMK1A', 'CAMK1-BETA': 'CAMK1B', 'CAMK2-ALPHA': 'CAMK2A',
+        'CAMK2-BETA': 'CAMK2B', 'CAMK2-DELTA': 'CAMK2D', 'CAMK2-DELTA ISO8': 'CAMK2D',
+        'CAMK2-GAMMA': 'CAMK2G', 'CDK11A': 'CDK11', 'CDK11A ISO10': 'CDK11',
+        'CDK11B': 'CDK 11', 'CK1 ALPHA': 'CK1A', 'CK1 DELTA': 'CK1D',
+        'CK1 EPSILON': 'CK1E', 'CK1-A': 'CK1A', 'CK1-D': 'CK1D', 'CK1-E': 'CK1E',
+        'CK1-G1': 'CK1G1', 'CK1-G2': 'CK1G2', 'CK1_ALPHA': 'CK1A', 'CK1_DELTA': 'CK1D',
+        'CK1_EPSILON': 'CK1E', 'CK2-A1': 'CK2A1', 'CK2-A2': 'CK2A2', 'DNA-PK': 'DNAPK',
+        'FAK1': 'FAK', 'FAK2': 'FAK', 'GSK-3ALPHA': 'GSK3A', 'GSK-3BETA': 'GSK3B',
+        'GSK-3_ALPHA': 'GSK3A', 'GSK-3_BETA': 'GSK3B', 'IKK-ALPHA': 'IKKA', 'IKK-BETA': 'IKKB',
+        'IKK-EPSILON': 'IKKE', 'IKK_ALPHA': 'IKKA', 'IKK_BETA': 'IKKB', 'IKK_EPSILON': 'IKKE',
+        'ILK1': 'ILK', 'JNK1 ISO2': 'JNK1', 'JNK2 ISO2': 'JNK2', 'LIMK1_DROME': 'LIMK1',
+        'MARK3 ISO3': 'MARK3', 'MNK1 ISO2': 'MNK1', 'P38-ALPHA': 'P38A', 'P38-BETA': 'P38B',
+        'P38-DELTA': 'P38D', 'P38-GAMMA': 'P38G', 'PDGFR ALPHA': 'PDGFRA', 'PDGFR BETA': 'PDGFRB',
+        'PDGFR_ALPHA': 'PDGFRA', 'PDGFR_BETA': 'PDGFRB', 'PDK-1': 'PDK1', 'PKACA ISO2': 'PKACA',
+        'PKC ALPHA': 'PKCA', 'PKC BETA': 'PKCB', 'PKC DELTA': 'PKCD', 'PKC EPSILON': 'PKCE',
+        'PKC ETA': 'PKCE', 'PKC GAMMA': 'PKCG', 'PKC IOTA': 'PKCI', 'PKC THETA': 'PKCT',
+        'PKC ZETA': 'PKCZ', 'PKCB ISO2': 'PKCB', 'PKC_ALPHA': 'PKCA', 'PKC_BETA': 'PKCB',
+        'PKC_DELTA': 'PKCD', 'PKC_DROME': 'PKCD', 'PKC_EPSILON': 'PKCE', 'PKC_ETA': 'PKCE',
+        'PKC_GAMMA': 'PKCG', 'PKC_IOTA': 'PKCI', 'PKC_THETA': 'PKCT', 'PKC_ZETA': 'PKCZ',
+        'PKG1 ISO2': 'PKG1', 'PKG1A': 'PKG1', 'PKG1B': 'PKG1', 'RET ISO3': 'RET', 'RSK-1': 'RSK1',
+        'RSK-2': 'RSK2', 'RSK-3': 'RSK3', 'SIK2': 'SIK', 'SRC ISO1': 'SRC', 'SRC-TYPE TYR-KINASES': 'SRC',
+        'SRC64B_DROME': 'SRC', 'SRMS': 'SRM',
+    }
+    phos_kinase_anno['kinase'] = phos_kinase_anno['kinase'].replace(replace_dict)
+    phos_kinase_anno = phos_kinase_anno.drop_duplicates(subset=['accession', 'pos', 'aa', 'kinase'])  # 15601
+    # step 5: merge with kinase category
+    kinase_category = process_kinase_category()
+    merged_phos_kinase_anno = phos_kinase_anno.merge(kinase_category, left_on='kinase', right_on='Name', how='inner')
+    merged_phos_kinase_anno.to_csv('data/dataset/EPSD_annotation/phos_kinase_anno.txt', sep='\t', index=False)
+    # merged_phos_kinase_anno['site_id'] = (merged_phos_kinase_anno['accession'] + '_' +
+    #                                       merged_phos_kinase_anno['pos'].astype(str) + '_' +
+    #                                       merged_phos_kinase_anno['aa'])
+    return merged_phos_kinase_anno # 11373
+
+
 class ProteinSequenceAnnotation:
     def __init__(self):
         select_kinase_group = self.get_kinase_group()
@@ -50,125 +204,137 @@ class ProteinSequenceAnnotation:
             }, ...], pd.DataFrame, pd.DataFrame]
         }
         """
-        # load uniprot, CBMAP, EPSD annotation
-        uniprot_phos_data = pd.read_csv('data/dataset/uniprot/uniprot_phos_data.txt', sep='\t')
-        lab_phos_data = pd.read_csv('data/dataset/CBMAP/lab_phos_data.txt', sep='\t')
-        epsd_kinase_phos_data = pd.read_csv('data/dataset/EPSD_annotation/phos_kinase_anno.txt', sep='\t')
-        protein_sequences: Dict = ProteinSeq().protein_sequences
+        save_path = 'data/dataset/cache/comprehend_annotation'
+        whether_load = os.path.exists(f'{save_path}/protein2full_annotation.pkl')
+        whether_load &= os.path.exists(f'{save_path}/site_table.txt')
+        whether_load &= os.path.exists(f'{save_path}/protein_table.txt')
+        if whether_load:
+            protein2full_annotation = Loader(f'{save_path}/protein2full_annotation.pkl').load_pkl()
+            site_table = pd.read_csv(f'{save_path}/site_table.txt', sep='\t', low_memory=False)
+            protein_table = pd.read_csv(f'{save_path}/protein_table.txt', sep='\t')
+        else:
+            # load uniprot, CBMAP, EPSD annotation
+            uniprot_phos_data = pd.read_csv('data/dataset/uniprot/uniprot_phos_data.txt', sep='\t')
+            lab_phos_data = pd.read_csv('data/dataset/CBMAP/lab_phos_data.txt', sep='\t')
+            epsd_kinase_phos_data = pd.read_csv('data/dataset/EPSD_annotation/phos_kinase_anno.txt', sep='\t')
+            protein_sequences: Dict = ProteinSeq().protein_sequences
 
-        # define some necessary variables
-        window = 5
-        site_table = []
-        site_table_columns = [
-            'site_id', 'protein', 'site_res', 'lab_label', 'uniprot_label', 'group_label',
-            'having_uniprot', 'having_kinase', 'having_lab', 'having_structure', 'site_fragment'
-        ]
-        protein_table = []
-        protein_table_columns = ['protein', 'sty_count', 'having_uniprot', 'having_kinase', 'having_lab',
-                                 'having_structure', 'uniprot_count', 'lab_count'] + self.get_kinase_group()
-        # structure_proteins = set([
-        #     f.split('.')[0] for f in os.listdir('data/dataset/protein_res_coordinates/alphafold/protein_graph')
-        # ])
-        focused_sites = {'S': 0, 'T': 1, 'Y': 2}
-        protein2full_annotation = {}
-        uniprot_proteins = set(uniprot_phos_data['accession'])
-        lab_proteins = set(lab_phos_data['accession'])
-        epsd_proteins = set(epsd_kinase_phos_data['accession'])
-        involved_proteins = (uniprot_proteins | lab_proteins | epsd_proteins)
-        protein_id2gene_name = self.get_id2gene_name()
-        for protein in tqdm(involved_proteins, desc='Generating Protein Comprehend Annotation'):
-            protein_seq = protein_sequences[protein]
-            # initialize the full annotation
-            is_sty = np.zeros((len(protein_seq), 3))
-            uniprot_general_label = np.zeros(len(protein_seq))
-            lab_general_label = np.zeros(len(protein_seq)) - 999
-            epsd_kinase_group_label = np.zeros((len(protein_seq), len(self.group2id)))
-            epsd_kinase_family_label = np.zeros((len(protein_seq), len(self.family2id)))
+            # define some necessary variables
+            window = 5
+            site_table = []
+            site_table_columns = [
+                'site_id', 'protein', 'site_res', 'lab_label', 'uniprot_label', 'group_label',
+                'having_uniprot', 'having_kinase', 'having_lab', 'having_structure', 'site_fragment'
+            ]
+            protein_table = []
+            protein_table_columns = ['protein', 'sty_count', 'having_uniprot', 'having_kinase', 'having_lab',
+                                     'having_structure', 'uniprot_count', 'lab_count'] + self.get_kinase_group()
+            structure_proteins = set([
+                f.split('.')[0] for f in os.listdir('data/dataset/protein_res_coordinates/alphafold/protein_graph')
+            ])
+            focused_sites = {'S': 0, 'T': 1, 'Y': 2}
+            protein2full_annotation = {}
+            uniprot_proteins = set(uniprot_phos_data['accession'])
+            lab_proteins = set(lab_phos_data['accession'])
+            epsd_proteins = set(epsd_kinase_phos_data['accession'])
+            involved_proteins = (uniprot_proteins | lab_proteins | epsd_proteins)
+            protein_id2gene_name = self.get_id2gene_name()
+            for protein in tqdm(involved_proteins, desc='Generating Protein Comprehend Annotation'):
+                protein_seq = protein_sequences[protein]
+                # initialize the full annotation
+                is_sty = np.zeros((len(protein_seq), 3))
+                uniprot_general_label = np.zeros(len(protein_seq))
+                lab_general_label = np.zeros(len(protein_seq)) - 999
+                epsd_kinase_group_label = np.zeros((len(protein_seq), len(self.group2id)))
+                epsd_kinase_family_label = np.zeros((len(protein_seq), len(self.family2id)))
 
-            # is_sty
-            for pos, aa in enumerate(protein_seq):
-                if aa in {'S', 'T', 'Y'}:
-                    is_sty[pos][focused_sites[aa]] = 1
+                # is_sty
+                for pos, aa in enumerate(protein_seq):
+                    if aa in {'S', 'T', 'Y'}:
+                        is_sty[pos][focused_sites[aa]] = 1
 
-            # uniprot general phosphorylation annotation
-            if protein in uniprot_proteins:
-                phos_pos = uniprot_phos_data[uniprot_phos_data['accession'] == protein]['pos'].to_list()
-                uniprot_general_label[phos_pos] = 1
+                # uniprot general phosphorylation annotation
+                if protein in uniprot_proteins:
+                    phos_pos = uniprot_phos_data[uniprot_phos_data['accession'] == protein]['pos'].to_list()
+                    uniprot_general_label[phos_pos] = 1
 
-            # CBMAP phosphorylation intensity annotation
-            if protein in lab_proteins:
-                phos_pos = lab_phos_data[lab_phos_data['accession'] == protein]['pos'].to_list()
-                mean_intensity = lab_phos_data[lab_phos_data['accession'] == protein]['standard_log_mean_intensity'].to_list()
-                lab_general_label[phos_pos] = mean_intensity
+                # CBMAP phosphorylation intensity annotation
+                if protein in lab_proteins:
+                    phos_pos = lab_phos_data[lab_phos_data['accession'] == protein]['pos'].to_list()
+                    mean_intensity = lab_phos_data[lab_phos_data['accession'] == protein]['standard_log_mean_intensity'].to_list()
+                    lab_general_label[phos_pos] = mean_intensity
 
-            # EPSD kinase-specific phosphorylation annotation
-            if protein in epsd_proteins:
-                phos_pos = epsd_kinase_phos_data[epsd_kinase_phos_data['accession'] == protein]['pos'].to_list()
-                group_lst = epsd_kinase_phos_data[epsd_kinase_phos_data['accession'] == protein]['Group'].to_list()
-                family_lst = epsd_kinase_phos_data[epsd_kinase_phos_data['accession'] == protein]['Family'].to_list()
-                # classified by kinase group
-                for pos, group in zip(phos_pos, group_lst):
-                    if group in self.group2id.keys():
-                        epsd_kinase_group_label[pos][self.group2id[group]] = 1
-                # classified by kinase family
-                for pos, family in zip(phos_pos, family_lst):
-                    if family in self.family2id.keys():
-                        epsd_kinase_family_label[pos][self.family2id[family]] = 1
+                # EPSD kinase-specific phosphorylation annotation
+                if protein in epsd_proteins:
+                    phos_pos = epsd_kinase_phos_data[epsd_kinase_phos_data['accession'] == protein]['pos'].to_list()
+                    group_lst = epsd_kinase_phos_data[epsd_kinase_phos_data['accession'] == protein]['Group'].to_list()
+                    family_lst = epsd_kinase_phos_data[epsd_kinase_phos_data['accession'] == protein]['Family'].to_list()
+                    # classified by kinase group
+                    for pos, group in zip(phos_pos, group_lst):
+                        if group in self.group2id.keys():
+                            epsd_kinase_group_label[pos][self.group2id[group]] = 1
+                    # classified by kinase family
+                    for pos, family in zip(phos_pos, family_lst):
+                        if family in self.family2id.keys():
+                            epsd_kinase_family_label[pos][self.family2id[family]] = 1
 
-            protein2full_annotation[protein] = {
-                'protein_seq': protein_seq, 'is_sty': is_sty,
-                'uniprot_general_label': uniprot_general_label,
-                'lab_general_label': lab_general_label,
-                'epsd_kinase_group_label': epsd_kinase_group_label,
-                'epsd_kinase_family_label': epsd_kinase_family_label
-            }
+                protein2full_annotation[protein] = {
+                    'protein_seq': protein_seq, 'is_sty': is_sty,
+                    'uniprot_general_label': uniprot_general_label,
+                    'lab_general_label': lab_general_label,
+                    'epsd_kinase_group_label': epsd_kinase_group_label,
+                    'epsd_kinase_family_label': epsd_kinase_family_label
+                }
 
-            # generate protein count table
-            sty_count = np.sum(is_sty)
-            group_count = np.zeros(len(self.group2id))
-            uniprot_count, lab_count = np.sum(uniprot_general_label), np.sum(lab_general_label > -999)
+                # generate protein count table
+                sty_count = np.sum(is_sty)
+                group_count = np.zeros(len(self.group2id))
+                uniprot_count, lab_count = np.sum(uniprot_general_label), np.sum(lab_general_label > -999)
 
-            # generate site table
-            sty_pos = np.where(np.sum(is_sty, axis=1) == 1)[0].tolist()
-            having_uniprot = 1 if protein in uniprot_proteins else 0
-            having_lab = 1 if protein in lab_proteins else 0
-            having_kinase = 1 if protein in epsd_proteins else 0
-            having_structure = 1 # if protein in structure_proteins else 0
-            padding_protein_seq = '_' * window + protein_seq + '_' * window
-            for pos in sty_pos:
-                site_res = protein_seq[pos]
-                site_id = protein_id2gene_name[protein] + '_' + protein + '_' + site_res + '_' + str(pos + 1)
-                uniprot_label = uniprot_general_label[pos]
-                lab_label = lab_general_label[pos]
-                if np.sum(epsd_kinase_group_label[pos]) == 0:
-                    group_label = 0
-                else:
-                    group_id = np.where(epsd_kinase_group_label[pos] == 1)[0]
-                    group_label = ', '.join([self.id2group[i] for i in group_id])
-                    for i in group_id:
-                        group_count[i] += 1
-                site_fragment = padding_protein_seq[pos: pos+2*window+1]
-                site_table.append((
-                    site_id, protein, site_res, lab_label, uniprot_label, group_label,
-                    having_uniprot, having_kinase, having_lab, having_structure, site_fragment
+                # generate site table
+                sty_pos = np.where(np.sum(is_sty, axis=1) == 1)[0].tolist()
+                having_uniprot = 1 if protein in uniprot_proteins else 0
+                having_lab = 1 if protein in lab_proteins else 0
+                having_kinase = 1 if protein in epsd_proteins else 0
+                having_structure = 1 if protein in structure_proteins else 0
+                padding_protein_seq = '_' * window + protein_seq + '_' * window
+                for pos in sty_pos:
+                    site_res = protein_seq[pos]
+                    site_id = protein_id2gene_name[protein] + '_' + protein + '_' + site_res + '_' + str(pos + 1)
+                    uniprot_label = uniprot_general_label[pos]
+                    lab_label = lab_general_label[pos]
+                    if np.sum(epsd_kinase_group_label[pos]) == 0:
+                        group_label = 0
+                    else:
+                        group_id = np.where(epsd_kinase_group_label[pos] == 1)[0]
+                        group_label = ', '.join([self.id2group[i] for i in group_id])
+                        for i in group_id:
+                            group_count[i] += 1
+                    site_fragment = padding_protein_seq[pos: pos+2*window+1]
+                    site_table.append((
+                        site_id, protein, site_res, lab_label, uniprot_label, group_label,
+                        having_uniprot, having_kinase, having_lab, having_structure, site_fragment
+                    ))
+                protein_table.append(tuple(
+                    [protein, sty_count, having_uniprot, having_kinase, having_lab, having_structure,
+                     uniprot_count, lab_count] + group_count.tolist()
                 ))
-            protein_table.append(tuple(
-                [protein, sty_count, having_uniprot, having_kinase, having_lab, having_structure,
-                 uniprot_count, lab_count] + group_count.tolist()
-            ))
-        site_table = pd.DataFrame(site_table, columns=site_table_columns)
-        # sort the df by 'general_label' to make the '1' at front
-        site_table = site_table.sort_values(by=[
-            'lab_label', 'having_lab', 'uniprot_label', 'having_uniprot', 'group_label',
-            'having_kinase', 'having_structure'
-        ], ascending=False).reset_index(drop=True) # 1189688
-        # filter same instances (the positive in same instances would be kept)
-        site_table = site_table.drop_duplicates(subset=['site_fragment']).reset_index(drop=True) # 1146170
-        protein_table = pd.DataFrame(protein_table, columns=protein_table_columns)
+            site_table = pd.DataFrame(site_table, columns=site_table_columns)
+            # sort the df by 'general_label' to make the '1' at front
+            site_table = site_table.sort_values(by=[
+                'lab_label', 'having_lab', 'uniprot_label', 'having_uniprot', 'group_label',
+                'having_kinase', 'having_structure'
+            ], ascending=False).reset_index(drop=True) # 1189688
+            # filter same instances (the positive in same instances would be kept)
+            site_table = site_table.drop_duplicates(subset=['site_fragment']).reset_index(drop=True) # 1146170
+            protein_table = pd.DataFrame(protein_table, columns=protein_table_columns)
+            Saver(protein2full_annotation, f'{save_path}/protein2full_annotation.pkl').save_pkl()
+            site_table.to_csv(f'{save_path}/site_table.txt', sep='\t', index=False)
+            protein_table.to_csv(f'{save_path}/protein_table.txt', sep='\t', index=False)
         return protein2full_annotation, site_table, protein_table
 
-    def split_dataset_at_protein_level(self, clean=False):
-        save_path = f'data/dataset/train_val_test_proteins.pkl'
+    def split_dataset_at_protein_level(self, clean=False, mode=None):
+        save_path = f'data/dataset/cache/train_val_test_proteins.pkl'
         if clean:
             os.system(f'rm {save_path}')
         if os.path.exists(save_path):
@@ -203,6 +369,64 @@ class ProteinSequenceAnnotation:
             return train_proteins, val_proteins, test_proteins
 
 
+class ProteinStructureFeature:
+    def __init__(self):
+        self.structure_dir = 'data/dataset/protein_res_coordinates/alphafold/protein_graph'
+        self.Residue = ResidueInfo()
+
+    def compute_all_sites_structure(self):
+        site_table = ProteinSequenceAnnotation().site_table
+        site_ids = set(site_table[site_table['having_structure'] == 1]['site_id'])
+        for site_id in tqdm(site_ids, desc='Computing all sites structure features'):
+            site_split = site_id.split('_')
+            protein = f"{site_split[0]}_{site_split[1]}"
+            pos = int(site_split[-1])
+            structure_feature = self.select_protein_structure(protein_name=protein, pos=pos)
+            Saver(structure_feature, filename=f'data/dataset/structure_features/{protein}_{pos}.pkl').save_pkl()
+
+    def selectProteinStructure(self, protein_name: str, pos: int):
+        file_name = f'data/dataset/structure_features/{protein_name}_{pos}.pkl'
+        if os.path.exists(file_name):
+            return Loader(file_name).load_pkl()
+        else:
+            structure_feature = self.select_protein_structure(protein_name=protein_name, pos=pos)
+            Saver(structure_feature, filename=f'data/dataset/structure_features/{protein_name}_{pos}.pkl').save_pkl()
+            return structure_feature
+
+    def select_protein_structure(self, protein_name: str, pos: int, site_num: int = 30,
+                                 structure_feature_nums: int = 44) -> np.array:
+        # return: (SecondStructure, PSI_PHI, RSA, Sequence)
+        file_path = self.structure_dir + '/' + protein_name + '.pkl'
+        proteinStructure = Loader(file_path).load_pkl()
+        site_dist = proteinStructure['DistMatrix'][pos]
+        site_index = np.argsort(site_dist)[:site_num]  # choose 30 closed sites around 'S'
+        site_SS = proteinStructure['SecondStructure'][site_index]  # sites, 8
+        site_PHIPSI = proteinStructure['PSI_PHI'][site_index]  # sites, 4
+        site_RSA = proteinStructure['RSA'][site_index]  # sites, 5
+        site_sites = [proteinStructure['Sequence'][i] for i in site_index]
+        # add physical properties
+        physical_properties = []
+        for site in site_sites:
+            fea = [
+                      self.Residue.getAtomNum()[site],  # 1
+                      self.Residue.getChainChargeNum()[site],  # 1
+                      self.Residue.getSideChainHydrogenBondNum()[site],  # 1
+                      self.Residue.getSideChainPKa()[site],  # 1
+                      self.Residue.getHydrophobicity()[site]  # 1
+                  ] + self.Residue.getOneHotDic()[site]  # 22
+            physical_properties.append(fea)
+        physical_properties = np.array(physical_properties)  # sites, 5+22
+        structure_features = np.concatenate([
+            site_SS, site_PHIPSI, site_RSA, physical_properties
+        ], axis=1)  # sites, 44
+        # impute lacked sites with 0
+        if len(site_index) < site_num:
+            pad_site = [0] * structure_feature_nums
+            padding_sites = np.array([pad_site for _ in range(site_num - len(site_index))])
+            structure_features = np.concatenate([structure_features, padding_sites], axis=0)
+        return structure_features
+
+
 class TrainingDataset:
     def __init__(self,
                  window_size: int, # the scale size of context
@@ -229,7 +453,7 @@ class TrainingDataset:
         self.site_table = site_table
 
     def getSeqInstance(self, clean=False) -> Tuple:
-        temp_dir = (f'data/dataset/train_seqs/processed_raw_seq_'
+        temp_dir = (f'data/dataset/cache/train_seqs/processed_raw_seq_'
                     f'{self.window_size}_{self.data_from}_{self.use_structure}')
         whether_load = self.use_structure
         if self.use_structure:
@@ -358,8 +582,9 @@ class TrainingDataset:
         val_indices = site_id_df[site_id_df['site_id'].isin(val_set_ids)].index.to_list()
         return train_indices, test_indices, val_indices
 
-    def get_set_size(self, label_instance, site_id_lst):
+    def get_set_size(self, label_instance, site_id_lst, whether_keep_test):
         train_indices, test_indices, val_indices = self.get_train_val_test_sites(site_ids=site_id_lst)
+        test_indices = [test_indices[i] for i, b in enumerate(whether_keep_test) if b]
 
         def _print_size_(__get_info__, train_, test_, val_, total_):
             df = {'Train-Set': __get_info__(label=train_), 'Test-Set': __get_info__(label=test_),
@@ -417,11 +642,11 @@ class TrainingDataset:
     def getDataset(self,
                    encode_mode: Literal['one-hot', 'esm-embedding'], # the coding method for protein sequences
                    select_res: Literal['S', 'T', 'Y'] = None,
-                   require_train: bool = True, require_test: bool = True, require_val: bool = True) -> Dict:
+                   require_train: bool = True, require_test: bool = True, require_val: bool = True,
+                   para_i: int = None) -> Dict:
         dataset = {}
         encoder = DiscreteEncoder(add_pos=False)
         label_instance, context_instance, structure_instance, mask_instance, site_id_lst = self.getSeqInstance()
-        self.get_set_size(label_instance, site_id_lst)
         if select_res is None:
             mask_instance = np.sum(mask_instance, axis=-1)
         else:
@@ -448,6 +673,53 @@ class TrainingDataset:
         context_train_lst, train_seq_mask, structure_train, train_site_ids = _split_instances_(train_indices)
         context_test_lst, test_seq_mask, structure_test, test_site_ids = _split_instances_(test_indices)
         context_val_lst, val_seq_mask, structure_val, val_site_ids = _split_instances_(val_indices)
+
+        # remove instances in test-set that are highly similar with train-set
+        def _hamming_similarity_(s1, s2):
+            distance = sum(c1 != c2 for c1, c2 in zip(s1, s2))
+            return 1 - distance / len(s1)
+
+        cache_path = f'data/dataset/cache/keep_test_set_{self.data_from}_{self.use_structure}.pkl'
+        if os.path.exists(cache_path):
+            whether_keep = Loader(cache_path).load_pkl()
+        else:
+            test_set_len = len(context_test_lst)
+            print(test_set_len)
+            i_lst = list(range(0, test_set_len, 2000))
+            if para_i is not None:
+                if para_i == len(i_lst)-1:
+                    start_, end_ = i_lst[para_i], test_set_len-1
+                else:
+                    start_, end_ = i_lst[para_i], i_lst[para_i+1]
+            else:
+                start_, end_ = 0, test_set_len-1
+            whether_keep, threshold = [True] * test_set_len, 0.8
+            # step 1: keep test-set independence
+            for i in tqdm(range(start_, end_), desc='Step 1. Keeping dependency...'):
+                for j in range(i + 1, test_set_len):
+                    hs = _hamming_similarity_(context_test_lst[i][1], context_test_lst[j][1])
+                    if hs >= threshold:
+                        whether_keep[i] = False
+                        break
+            # step 2: remove redundant instances in test-set
+            for i in tqdm(range(start_, end_), desc='Step 2. Removing similar instances with train-set...'):
+                if whether_keep[i]:
+                    for j in range(len(context_train_lst)):
+                        hs = _hamming_similarity_(context_test_lst[i][1], context_train_lst[j][1])
+                        if hs >= threshold:
+                            whether_keep[i] = False
+                            break
+            Saver(whether_keep, f'data/dataset/cache/parallel/{para_i}_'
+                                f'{self.data_from}_{self.use_structure}.pkl').save_pkl()
+        self.get_set_size(label_instance, site_id_lst, whether_keep)
+        print(f'Removing {np.sum(np.array(whether_keep) == False)} instances in test-set!')
+
+        context_test_lst = [context_test_lst[i] for i in range(len(context_test_lst)) if whether_keep[i]]
+        test_seq_mask = test_seq_mask[whether_keep]
+        if self.use_structure:
+            structure_test = structure_test[whether_keep]
+        test_site_ids = [test_site_ids[i] for i in range(len(test_site_ids)) if whether_keep[i]]
+
         dataset['structure'] = [structure_train, structure_test, structure_val]
         dataset['site_id'] = train_site_ids, test_site_ids, val_site_ids
 
@@ -495,6 +767,116 @@ class TrainingDataset:
         return dataset
 
 
+class CrossValidationDataset:
+    def __init__(self,
+                 window_size: int,  # the scale size of context
+                 use_structure: bool,  # whether using structure data
+                 data_from: Literal['uniprot', 'epsd_group', 'epsd_family', 'cbmap'],  # the source of data
+                 k_folds: int = 5,
+                 ):
+        self.datasetor = TrainingDataset(window_size, use_structure, data_from)
+        self.k_folds = k_folds
+
+    def get_cv_dataset(self, fold_i, encode_mode='esm-embedding'):
+        dataset = {}
+        label_instance, context_instance, structure_instance, mask_instance, site_id_lst = self.datasetor.getSeqInstance()
+        mask_instance = np.sum(mask_instance, axis=-1)
+        cv_proteins = self.get_cv_proteins()[f'fold_{fold_i}']
+        # get train-test indices
+        train_proteins, test_proteins = cv_proteins['train-set'], cv_proteins['test-set']
+        site_table = self.datasetor.protein_seq_anno.site_table
+        train_set_ids = set(site_table.loc[site_table['protein'].isin(train_proteins), 'site_id'])
+        test_set_ids = set(site_table.loc[site_table['protein'].isin(test_proteins), 'site_id'])
+        site_id_df = pd.DataFrame({'site_id': site_id_lst})
+        train_indices = site_id_df[site_id_df['site_id'].isin(train_set_ids)].index.to_list()
+        test_indices = site_id_df[site_id_df['site_id'].isin(test_set_ids)].index.to_list()
+
+        def _split_instances_(indices):
+            context_lst = [(label_instance[ii], context_instance[ii]) for ii in indices]
+            seq_mask = torch.tensor(np.array([mask_instance[ii] for ii in indices])).float()
+            structures = None
+            site_ids = [site_id_lst[ii] for ii in indices]
+            return context_lst, seq_mask, structures, site_ids
+
+        context_train_lst, train_seq_mask, structure_train, train_site_ids = _split_instances_(train_indices)
+        context_test_lst, test_seq_mask, structure_test, test_site_ids = _split_instances_(test_indices)
+        dataset['structure'] = [structure_train, structure_test]
+        dataset['site_id'] = train_site_ids, test_site_ids
+
+        if encode_mode == 'one-hot':
+            encoder = DiscreteEncoder(add_pos=False)
+            train_seq_label, train_seq_vec = encoder.one_hot(context_train_lst)
+            train_seq_label = torch.tensor(train_seq_label).float()
+            train_seq_vec = torch.tensor(train_seq_vec).transpose(1, 2).float()
+            test_seq_label, test_seq_vec = encoder.one_hot(context_test_lst)
+            test_seq_label = torch.tensor(test_seq_label).float()
+            test_seq_vec = torch.tensor(test_seq_vec).transpose(1, 2).float()
+            dataset['context'] = [train_seq_label, train_seq_vec, train_seq_mask,
+                                  None, None, None,
+                                  test_seq_label, test_seq_vec, test_seq_mask]
+        else:
+            train_seq_label, train_seq_str, test_seq_label, test_seq_str = [], [], [], []
+            for label_i, seq_i in context_train_lst:
+                train_seq_label.append(label_i)
+                train_seq_str.append(seq_i)
+            train_seq_label = torch.tensor(np.array(train_seq_label)).float()
+            for label_i, seq_i in context_test_lst:
+                test_seq_label.append(label_i)
+                test_seq_str.append(seq_i)
+            test_seq_label = torch.tensor(np.array(test_seq_label)).float()
+
+            dataset['context'] = [
+                train_seq_label, train_seq_str, train_seq_mask,
+                None, None, None,
+                test_seq_label, test_seq_str, test_seq_mask
+            ]
+        return dataset
+
+    def get_cv_proteins(self):
+        cache_path = 'data/dataset/cache/cv_train_test_proteins.pkl'
+        if os.path.exists(cache_path):
+            return Loader(cache_path).load_pkl()
+        else:
+            protein_table = self.datasetor.protein_seq_anno.protein_table
+            all_proteins = set(protein_table['protein'])
+            lab_proteins = set(protein_table[protein_table['having_lab'] == 1]['protein'])
+            uniprot_proteins = set(protein_table[protein_table['having_uniprot'] == 1]['protein'])
+            epsd_proteins = set(protein_table[protein_table['having_kinase'] == 1]['protein'])
+            all_involved_proteins = lab_proteins & uniprot_proteins & epsd_proteins
+            other_lab_proteins = lab_proteins - all_involved_proteins
+            other_proteins = list(all_proteins - all_involved_proteins - other_lab_proteins)
+            all_involved_proteins = list(all_involved_proteins)
+            other_lab_proteins = list(other_lab_proteins)
+
+            random.seed(1009)
+            random.shuffle(all_involved_proteins)
+            random.shuffle(other_lab_proteins)
+            random.shuffle(other_proteins)
+
+            def _split_lst_(lst):
+                split_lst = []
+                step = math.ceil(len(lst) / self.k_folds)
+                for ii in range(self.k_folds):
+                    split_lst.append(lst[ii * step:(ii + 1) * step])
+                return split_lst
+
+            all_involved_proteins_lst = _split_lst_(all_involved_proteins)
+            other_lab_proteins_lst = _split_lst_(other_lab_proteins)
+            other_proteins_lst = _split_lst_(other_proteins)
+            all_proteins_lst = [
+                all_involved_proteins_lst[i] + other_lab_proteins_lst[i] + other_proteins_lst[i]
+                for i in range(self.k_folds)
+            ]
+            cv_proteins = {}
+            for i in range(self.k_folds):
+                cv_proteins[f'fold_{i}'] = {
+                    'test-set': set(all_proteins_lst[i]),
+                    'train-set': all_proteins - set(all_proteins_lst[i])
+                }
+            Saver(cv_proteins, cache_path).save_pkl()
+            return cv_proteins
+
+
 class ApplicationDataset:
     def __init__(self):
         self.padding = '_'
@@ -505,8 +887,15 @@ class ApplicationDataset:
     def read_missense_annotation() -> pd.DataFrame:
         data_path = 'data/genome/missense/annotation_GRch38_common_all_20180418_annovar_output.missense_SNP_with_protein_AA.tsv'
         seq_data = pd.read_csv(data_path, sep='\t')
-        independent_snps = set(seq_data['SNP'].drop_duplicates(keep=False))
-        seq_data = seq_data.loc[seq_data['SNP'].isin(independent_snps), :]
+        selected_cols = ['SNP', 'aa_ref', 'aa_alt', 'ref', 'alt', 'gene', 'sequence', 'pos']
+        seq_data = seq_data[selected_cols].rename(columns={'ref': 'base_ref', 'alt': 'base_alt'})
+        seq_data['i_name'] = (seq_data['SNP'].astype(str) + '_' + seq_data['pos'].astype(str) + '_' +
+                              seq_data['aa_ref'].astype(str) + '_' + seq_data['aa_alt'].astype(str))
+        seq_data = seq_data[['SNP', 'aa_ref', 'aa_alt', 'base_ref', 'gene', 'sequence', 'pos', 'i_name']].drop_duplicates().merge(
+            seq_data.groupby('i_name')['base_alt'].agg(', '.join).reset_index(), on='i_name'
+        )
+        # independent_snps = set(seq_data['SNP'].drop_duplicates(keep=False))
+        # seq_data = seq_data.loc[seq_data['SNP'].isin(independent_snps), :]
         return seq_data
 
     def getApplicationInstances(self, window_size: int) -> pd.DataFrame:
@@ -515,10 +904,11 @@ class ApplicationDataset:
         seq_data = self.seq_data.copy()
         application_instances = []
         for i in tqdm(range(seq_data.shape[0]), desc='Get Application Instances By Transcript'):
+            snp_row = seq_data.iloc[i]
             __padding = self.padding * window_size * 2
-            full_seq = __padding + seq_data.iloc[i].iloc[13].strip('*') + __padding
-            variant_pos = seq_data.iloc[i].iloc[4] - 1 + window_size * 2
-            aa_ref, aa_alt = seq_data.iloc[i].iloc[5], seq_data.iloc[i].iloc[6]
+            full_seq = __padding + snp_row.loc['sequence'].strip('*') + __padding
+            variant_pos = snp_row.loc['pos'] - 1 + window_size * 2
+            aa_ref, aa_alt = snp_row.loc['aa_ref'], snp_row.loc['aa_alt']
             processed_alt_seq = full_seq[variant_pos - window_size * 2: variant_pos + window_size * 2 + 1]
             processed_ref_seq = alter_string_at_pos(processed_alt_seq, window_size * 2, aa_ref)
             left, right = window_size, len(processed_ref_seq) - window_size - 1
@@ -543,14 +933,15 @@ class ApplicationDataset:
                 alt_split_seq.append(processed_alt_seq[pos - window_size:pos + window_size + 1])
                 variant_sty_distance.append(pos - window_size * 2)
                 sty_changed_lst.append('aa2sty')
-            gene_name, rsid = seq_data.iloc[i].iloc[12], seq_data.iloc[i].iloc[9]
+
             application_instances += list(zip(
-                [rsid] * len(ref_split_seq), [gene_name] * len(alt_split_seq),
+                [snp_row.loc['i_name']] * len(ref_split_seq),
                 ref_split_seq, alt_split_seq, variant_sty_distance, sty_changed_lst
             ))
         application_instances = pd.DataFrame(
-            application_instances, columns=['SNP', 'gene', 'ref_seq', 'alt_seq', 'variant_sty_distance', 'sty_changed']
+            application_instances, columns=['i_name', 'ref_seq', 'alt_seq', 'variant_sty_distance', 'sty_changed']
         )
+
         return application_instances
 
     def getSTYSnps(self) -> Tuple[Set, Set]:
@@ -581,6 +972,80 @@ class GWASProcessor:
         diseases.sort(key=lambda x: x[0])
         diseases.append('All_disease')
         return diseases
+
+    def process_NEW202_GWAS(self):
+        # return: Dict['disease': [rsid, rsid, ...], ...]
+        file_dir = '/data/shared_data/neuropsych_GWAS/EUR/processed'
+        file_names = [
+            '/ALS/ALS_processed.txt', '/ASD/ASD_processed.txt', '/BIP/BIP_processed.txt',
+            '/Insomnia/Insomnia_processed.txt', '/TAAU/EUR_stratified/AgeSmk_processed.txt',
+            '/TAAU/EUR_stratified/CigDay_processed.txt', '/TAAU/EUR_stratified/DrnkWk_processed.txt',
+            '/TAAU/EUR_stratified/SmkCes_processed.txt', '/TAAU/EUR_stratified/SmkInit_processed.txt',
+            '/BMI/BMI_processed.txt', '/AD/file2/ADfile2_processed.txt', '/SCZ/file2/SCZfile2_processed.txt',
+            '/PD/PD_processed.txt', '/IQ/IQ_processed.txt', '/PTSD/PTSD_processed.txt', '/MDD/MDD_processed.txt',
+            '/ADHD/ADHD_processed.txt', '/ANX/ANX_processed.txt', '/ED/ED_processed.txt', '/EA/EA_processed.txt',
+        ]
+        diseases = [
+            'ALS', 'ASD', 'BIP', 'Insomnia', 'TAAU-AgeSmk', 'TAAU-CigDay', 'TAAU-DrnkWk', 'TAAU-SmkCes',
+            'TAAU-SmkInit', 'BMI', 'AD', 'SCZ', 'PD', 'IQ', 'PTSD', 'MDD', 'ADHD', 'ANX', 'ED', 'EA',
+        ]
+        all_disease_snps = self.gwas_rs['All_disease']
+        for i, file_name in tqdm(enumerate(file_names), desc='Processing GWAS...'):
+            if diseases[i] not in self.gwas_rs.keys():
+                temp_rs = pd.read_csv(file_dir + file_name, sep='\t')
+                self.gwas_rs[diseases[i]] = set(temp_rs.loc[temp_rs['p'] <= self.p_threshold, 'rsid'])
+                all_disease_snps.update(self.gwas_rs[diseases[i]])
+        self.gwas_rs['All_disease'] = all_disease_snps
+        Saver(self.gwas_rs, self.gwas_rs_path).save_pkl()
+
+
+class RAVARProcessor:
+    def __init__(self):
+        self.ravar_rs_path = 'data/genome/enrichment/ravar_sig_all_snps.pkl'
+        if os.path.exists(self.ravar_rs_path):
+            self.disease2rare_variants = Loader(self.ravar_rs_path).load_pkl()
+        else:
+            self.disease2rare_variants = {'All_disease': set()}
+
+    def count_sig_num(self):
+        return {d: len(self.disease2rare_variants[d]) for d in self.get_diseases()}
+
+    def get_diseases(self) -> List:
+        diseases = [i for i in self.disease2rare_variants.keys() if i != 'All_disease']
+        diseases.sort(key=lambda x: x[0])
+        diseases.append('All_disease')
+        return diseases
+
+    def generate_rs(self):
+        ravar_variants = pd.read_csv('data/genome/RAVAR/snp_fulltable.txt', sep='\t')
+        kept_columns = ['RSID', 'CHR', 'POS', 'Genotype', 'MAF', 'Mapped Gene', 'RID', 'Reported Trait', 'Trait Label']
+        ravar_variants = ravar_variants[kept_columns].drop_duplicates()
+        for trait in set(ravar_variants['Trait Label']):
+            self.disease2rare_variants[trait] = set(ravar_variants[ravar_variants['Trait Label'] == trait]['RSID'])
+            self.disease2rare_variants['All_disease'] |= self.disease2rare_variants[trait]
+        Saver(self.disease2rare_variants, self.ravar_rs_path).save_pkl()
+
+
+def process_gene_info():
+    # download from genecode: gencode.v49.annotation.gtf
+    gene_df = pd.read_csv('/data/projects/xuy/DeepMEP/data/genome/geneinfo/gencode.v49.annotation.gtf',
+                          skiprows=5, sep='\t', header=None)
+    gene_df = gene_df[[0, 2, 3, 4, 8]]
+    gene_df.columns = ['chr', 'type', 'start', 'end', 'gene_id']
+    gene_df = gene_df[gene_df['type'] == 'gene']
+    gene_df = gene_df[gene_df['chr'].isin(set([f'chr{i}' for i in range(1, 23)]))]
+
+    def func(x):
+        return x.split('gene_name ')[1].split(';')[0].strip('"')
+
+    gene_df['gene_id'] = gene_df['gene_id'].apply(func)
+    gene_df = gene_df.drop(columns=['type']).reset_index(drop=True)
+    gene_df['gene_length'] = gene_df['end'] - gene_df['start']
+    i_lst = []
+    for rsid, group in gene_df.groupby('gene_id'):
+        i_lst.append(group['gene_length'].idxmax())
+    gene_df = gene_df.iloc[i_lst].reset_index(drop=True)
+    gene_df.to_csv('/data/projects/xuy/DeepMEP/data/genome/geneinfo/gene_info.txt', sep='\t', index=False)
 
 
 class GWASMafLdProcessor:

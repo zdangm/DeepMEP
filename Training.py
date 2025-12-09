@@ -25,6 +25,7 @@ class Trainer:
                  device: Optional[Union[str, int, List[int]]] = None,  # 'cpu' | int | list, devices for training
                  is_print: bool = True,  # whether printing the metrics of each epoch
                  is_save: bool = True,  # whether saving the training results
+                 fold_i: int = None, # k-fold cross validation
                  ):
         # get the number of input channels
         in_channels = 0
@@ -112,8 +113,14 @@ class Trainer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
 
         # get dataset
-        Dataseter = TrainingDataset(window_size=window_size, use_structure=False, data_from=data_from)
-        self.dataset_dic = Dataseter.getDataset(encode_mode=encode_mode, require_test=False)
+        self.fold_i = fold_i
+        if fold_i is not None:
+            Datasetor = CrossValidationDataset(window_size, False, data_from)
+            self.dataset_dic = Datasetor.get_cv_dataset(fold_i)
+            self.encode_mode = 'esm-embedding'
+        else:
+            Dataseter = TrainingDataset(window_size=window_size, use_structure=False, data_from=data_from)
+            self.dataset_dic = Dataseter.getDataset(encode_mode=encode_mode, require_test=False)
 
     def train_model(self):
         if self.encode_mode == 'esm-embedding':
@@ -437,12 +444,15 @@ class Trainer:
 
     def save_rs(self):
         if self.is_save:
-            file_dir = f'rs/our_model/{self.data_from}'
+            if self.fold_i is not None:
+                file_dir = f'rs/our_model/cross_validation/{self.data_from}/{self.fold_i}'
+            else:
+                file_dir = f'rs/our_model/{self.data_from}'
             make_dir(file_dir)
             file_dir = f'{file_dir}/{self.task_type}_{self.encode_mode}'
             make_dir(file_dir)
             # make save directory
-            file_dir = f'{file_dir}/{datetime.datetime.now():%Y-%m-%d_%H:%M:%S}'
+            file_dir = f'{file_dir}/{self.window_size}_{self.return_layer}'
             make_dir(file_dir)
             print(file_dir)
             # save model
@@ -450,7 +460,7 @@ class Trainer:
                 best_model_path = f'{file_dir}/model_{self.window_size}.pth'
             else:
                 best_model_path = f'{file_dir}/model_{self.window_size}_{self.return_layer}.pth'
-            Saver(variable=self.best_model, filename=best_model_path).save_pth()
+            Saver(variable=self.best_model.state_dict(), filename=best_model_path).save_pth()
             # save running metrics
             self.plotTrainingMetrics(filename=f'{file_dir}/Metrics.pdf')
             # save val pred
